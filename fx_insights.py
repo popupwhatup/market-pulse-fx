@@ -163,3 +163,29 @@ def fx_insights():
             if conn:
                 conn.close()
 
+
+    @task
+    def generate_market_insight(moves):
+
+        if not moves:
+            raise AirflowSkipException("No moves available to generate market insight")
+
+        high_vol_count = len([item for item in moves if item["volatility_flag"] == "HIGH"])
+        top_mover = max(moves, key=lambda item: abs(float(item["pct_change"])))
+        market_regime = "HIGH_VOLATILITY" if high_vol_count >= 3 else "NORMAL"
+        high_touch_flag = market_regime == "HIGH_VOLATILITY"
+        
+        if high_touch_flag:
+            summary = f"{top_mover['pair']} was the top mover today with a {float(top_mover['pct_change']):.2f}% move. Market volatility is elevated." 
+        else:
+            summary = f"{top_mover['pair']} was the top mover today with a {float(top_mover['pct_change']):.2f}% move. Market volatility remains normal."
+        insight = {
+            "insight_date": moves[0]["rate_date"],
+            "top_mover_pair": top_mover["pair"],
+            "top_mover_pct": top_mover["pct_change"],
+            "market_regime": market_regime,
+            "high_touch_flag": high_touch_flag,
+            "summary": summary
+        }
+
+        return insight
