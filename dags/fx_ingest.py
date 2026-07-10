@@ -3,18 +3,21 @@ from __future__ import annotations
 from datetime import datetime
 import requests
 import psycopg2
+import os
 
 from airflow.sdk import dag, task, Asset
 from airflow.operators.bash import BashOperator
+from airflow.exceptions import AirflowSkipException
 
-fx_rates_asset = Asset("postgres://fx_rates")
+fx_rates_asset = Asset("market_pulse_fx_rates")
+
 
 DB_CONFIG = {
-    "host": "postgres",
-    "port": 5432,
-    "dbname": "airflow",
-    "user": "airflow",
-    "password": "airflow",
+    "host": os.environ["POSTGRES_HOST"],   
+    "port": int(os.environ["POSTGRES_PORT"]),
+    "dbname": os.environ["PROJECT_DB"],
+    "user": os.environ["POSTGRES_USER"],
+    "password": os.environ["POSTGRES_PASSWORD"],
 }
 
 def get_connection():
@@ -86,6 +89,11 @@ def fx_ingest():
     
     @task
     def fetch_fx_rates(ds=None):
+        #อันนี้คือวิธีที่เราทำให้ projects ก่อนหน้านี้ คือเราไปหยิบ ds มาเอง
+        #def fetch_fx_rates():
+        #context = get_current_context() 
+        #ds = context["ds"] หรือ context.get("ds")
+
         url = (
             f"https://api.frankfurter.dev/v1/{ds}"
             "?base=USD&symbols=EUR,GBP,JPY,CHF,CAD,AUD,NZD,MYR,THB"
@@ -95,6 +103,9 @@ def fx_ingest():
         response.raise_for_status()
 
         data = response.json()
+
+        if "rates" not in data or not data["rates"]:
+            raise AirflowSkipException(f"No FX rates returned for {ds}")
 
         market_pairs = {
             "EUR": {"pair": "EURUSD", "invert": True},
@@ -135,3 +146,72 @@ def fx_ingest():
         
         return rows
              
+
+    @task(outlets=[fx_rates_asset])
+    def load_fx_rates(rows):
+        conn = None
+        cursor = None
+
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+
+            for row in rows:
+                cursor.execute("""
+                    INSERT INTO fx_rates (
+                        rate_date,
+                        pair,
+                        base_currency,
+                        quote_currency,
+                        rate,
+                        raw_api_base,
+                        raw_api_quote,
+                        raw_api_rate           
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (rate_date, pair)
+                    DO UPDATE SET
+                        base_currency = EXCLUDED.base_currency,
+                        quote_currency = EXCLUDED.quote_currency,
+                        rate = EXCLUDED.rate,
+                        raw_api_base = EXCLUDED.raw_api_base,
+                        raw_api_quote = EXCLUDED.raw_api_quote,
+                        raw_api_rate = EXCLUDED.raw_api_rate;
+                """, (
+                    row["rate_date"],
+                    row["pair"],
+                    row["base_currency"],
+                    row["quote_currency"],
+                    row["rate"],
+                    row["raw_api_base"],
+                    row["raw_api_quote"],
+                    row["raw_api_rate"],
+                ))
+            conn.commit()
+            print(f"Loaded {len(rows)} FX rate rows.")
+
+        except Exception:
+            if conn:
+                conn.rollback()
+            raise
+
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+
+    
+    log_run = BashOperator(
+        task_id="log_run",
+        bash_command="echo 'fx_ingest completed for {{ ds }}'",
+    )
+
+    
+    created = create_tables()
+    rates = fetch_fx_rates()
+    loaded = load_fx_rates(rates)
+
+    created >> rates >> loaded >> log_run
+
+fx_ingest()
