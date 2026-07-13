@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+import pendulum
 import requests
 import psycopg2
 import os
@@ -25,7 +25,7 @@ def get_connection():
 
 @dag(
     dag_id="fx_ingest",
-    start_date=datetime(2026, 7, 1),
+    start_date=pendulum.datetime(2026, 7, 1, tz="UTC"),
     schedule="30 16 * * 1-5",
     catchup=False,
     tags=["project4", "fx", "ingest"]
@@ -80,6 +80,12 @@ def fx_ingest():
                 );
             """)
             conn.commit()
+
+        except Exception:
+            if conn:
+                conn.rollback()
+            raise
+
         finally:
             if cursor:
                 cursor.close()

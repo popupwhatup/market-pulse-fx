@@ -189,3 +189,70 @@ def fx_insights():
         }
 
         return insight
+    
+
+    @task
+    def load_market_insight(insight):
+        conn = None
+        cursor = None
+
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                INSERT INTO fx_insights (
+                    insight_date,
+                    top_mover_pair,
+                    top_mover_pct,
+                    market_regime,
+                    high_touch_flag,
+                    summary           
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (insight_date)
+                DO UPDATE SET
+                    top_mover_pair = EXCLUDED.top_mover_pair,
+                    top_mover_pct = EXCLUDED.top_mover_pct,
+                    market_regime = EXCLUDED.market_regime,
+                    high_touch_flag = EXCLUDED.high_touch_flag,
+                    summary = EXCLUDED.summary,
+                    created_at = CURRENT_TIMESTAMP;
+            """, (
+                insight["insight_date"],
+                insight["top_mover_pair"],
+                insight["top_mover_pct"],
+                insight["market_regime"],
+                insight["high_touch_flag"],
+                insight["summary"],
+            ))
+            conn.commit()
+            print(f"Loaded market insight for {insight['insight_date']} into fx_insights")
+
+        except Exception:
+            if conn:
+                conn.rollback()
+            raise
+
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+
+
+
+    log_run = BashOperator(
+        task_id="log_run",
+        bash_command ="echo 'fx_insights completed successfully'",
+    )
+
+
+    moves = calculate_daily_moves()
+    loaded_moves = load_daily_moves(moves)
+    insight = generate_market_insight(moves)
+    loaded_insight = load_market_insight(insight)
+
+    [loaded_moves, loaded_insight] >> log_run
+
+fx_insights()
